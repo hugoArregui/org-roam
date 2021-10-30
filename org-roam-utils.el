@@ -228,6 +228,16 @@ If BOUND, scan up to BOUND bytes of the buffer."
       (when (re-search-forward re bound t)
         (buffer-substring-no-properties (match-beginning 1) (match-end 1))))))
 
+(defun org-roam-skip-drawers ()
+  "Move point to the end of all drawers.
+This assumes that drawers are properly terminated with :END:."
+  (let ((drawer-re "^[ \t]*:.+:[ \t]*$"))
+    (while (looking-at drawer-re)
+      (when (and (re-search-forward
+                    "^\\([ \t]*:END:[ \t]*\n?\\)\\|^\\*+[ \t]" nil t)
+                   (match-end 1))
+	(goto-char (match-end 1))))))
+
 (defun org-roam-set-keyword (key value)
   "Set keyword KEY to VALUE.
 If the property is already set, it's value is replaced."
@@ -237,14 +247,13 @@ If the property is already set, it's value is replaced."
           (if (string-blank-p value)
               (kill-whole-line)
             (replace-match (concat " " value) 'fixedcase nil nil 1))
-        (while (and (not (eobp))
-                    (looking-at "^[#:]"))
-          (if (save-excursion (end-of-line) (eobp))
+        (org-roam-skip-drawers)
+        (if (save-excursion (end-of-line) (eobp))
               (progn
                 (end-of-line)
                 (insert "\n"))
             (forward-line)
-            (beginning-of-line)))
+            (beginning-of-line))
         (insert "#+" key ": " value "\n")))))
 
 (defun org-roam-erase-keyword (keyword)
