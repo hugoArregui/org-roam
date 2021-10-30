@@ -368,6 +368,47 @@ If UPDATE-P is non-nil, first remove the file in the database."
           (dolist (fn fns)
             (funcall fn link)))))))
 
+(defun org-roam-db-insert-links ()
+  "Run FNS over all links in the current buffer."
+  (let ((last-section '())
+        (last-section-org-id '())
+        (last-section-properties '()))
+    (org-element-map (org-element-parse-buffer) '(link node-property keyword)
+      (lambda (element)
+        (let* ((type (org-element-type element))
+               link bounds)
+          (cond
+           ;; Links correctly recognized by Org Mode
+           ((eq type 'link)
+            (setq link element))
+           ;; Links in property drawers and lines starting with #+. Recall that, as for Org Mode v9.4.4, the
+           ;; org-element-type of links within properties drawers is "node-property" and for lines starting with
+           ;; #+ is "keyword".
+           ((and (or (eq type 'node-property)
+                     (eq type 'keyword))
+                 (goto-char (org-element-property :begin element))
+                 (setq bounds (org-in-regexp org-link-any-re))
+                 (setq link (buffer-substring-no-properties
+                             (car bounds)
+                             (cdr bounds))))
+            (with-temp-buffer
+              (delay-mode-hooks (org-mode))
+              (insert link)
+              (goto-char 1)
+              (setq link element))))
+          (when link
+            (let ((section (org-element-lineage link '(section))))
+              (if (or (not section) ;; The current link has no section (is in header for example)
+                      (not (eq section last-section)))
+                (progn
+                  (setq last-section section)
+                  (goto-char (org-element-property :begin element))
+                  (setq last-section-org-id (org-roam-id-at-point))
+                  (setq last-section-properties (list :outline (ignore-errors
+                                                                 ;; This can error if link is not under any headline
+                                                                 (org-get-outline-path 'with-self 'use-cache))))))
+              (org-roam-db-insert-link last-section-org-id last-section-properties link))))))))
+
 (defun org-roam-db-map-citations (info fns)
   "Run FNS over all citations in the current buffer.
 INFO is the org-element parsed buffer."
@@ -486,31 +527,28 @@ INFO is the org-element parsed buffer."
                             :values $v1]
                            rows)))))
 
-(defun org-roam-db-insert-link (link)
-  "Insert link data for LINK at current point into the Org-roam cache."
-  (save-excursion
-    (goto-char (org-element-property :begin link))
-    (let ((type (org-element-property :type link))
-          (path (org-element-property :path link))
-          (source (org-roam-id-at-point))
-          (properties (list :outline (ignore-errors
-                                       ;; This can error if link is not under any headline
-                                       (org-get-outline-path 'with-self 'use-cache)))))
-      ;; For Org-ref links, we need to split the path into the cite keys
-      (when (and source path)
-        (if (and (boundp 'org-ref-cite-types)
-                 (fboundp 'org-ref-split-and-strip-string)
-                 (member type org-ref-cite-types))
-            (progn
+(defun org-roam-db-insert-link (source properties link)
+  "Insert link data for LINK at current point into the Org-roam cache, SOURCE is the current section org-id and PROPERTIES its properties."
+  (let ((type (org-element-property :type link))
+        (path (org-element-property :path link)))
+    ;; For Org-ref links, we need to split the path into the cite keys
+    (when (and source path)
+      (if (and (boundp 'org-ref-cite-types)
+               (fboundp 'org-ref-split-and-strip-string)
+               (member type org-ref-cite-types))
+          (progn
+            (save-excursion
+              (goto-char (org-element-property :begin link))
               (setq path (org-ref-split-and-strip-string path))
               (org-roam-db-query
                [:insert :into citations
-                :values $v1]
-               (mapcar (lambda (p) (vector source p (point) properties)) path)))
-          (org-roam-db-query
-           [:insert :into links
-            :values $v1]
-           (vector (point) source path type properties)))))))
+                        :values $v1]
+               (mapcar (lambda (p) (vector source p (point) properties)) path)))))
+
+        (org-roam-db-query
+         [:insert :into links
+                  :values $v1]
+         (vector (point) source path type properties)))))
 
 (defun org-roam-db-insert-citation (citation)
   "Insert data for CITATION at current point into the Org-roam cache."
@@ -564,7 +602,7 @@ in `org-roam-db-sync'."
   (setq file-path (or file-path (buffer-file-name (buffer-base-buffer))))
   (let ((content-hash (org-roam-db--file-hash file-path))
         (db-hash (caar (org-roam-db-query [:select hash :from files
-                                           :where (= file $s1)] file-path)))
+                                                   :where (= file $s1)] file-path)))
         info)
     (unless (string= content-hash db-hash)
       (unless no-require
@@ -585,8 +623,7 @@ in `org-roam-db-sync'."
                    #'org-roam-db-insert-refs))
             (setq org-outline-path-cache nil)
             (setq info (org-element-parse-buffer))
-            (org-roam-db-map-links
-             (list #'org-roam-db-insert-link))
+            (org-roam-db-insert-links)
             (when (fboundp 'org-cite-insert)
               (require 'oc)             ;ensure feature is loaded
               (org-roam-db-map-citations
